@@ -1,0 +1,77 @@
+# Install required packages
+!pip install pandas_ta pushbullet.py yfinance pandas
+
+# Import necessary libraries
+import yfinance as yf
+import pandas as pd
+import pandas_ta as ta
+import time
+from pushbullet import Pushbullet
+
+# Step 1: Set up Pushbullet API key (replace with your Pushbullet API key)
+API_KEY = 'x.XXXXXXXXXXXXXXXXX'  # ***Replace with your Pushbullet API key***
+pb = Pushbullet(API_KEY)
+
+# Step 2: Define the list of NIFTY 50 stocks (Example list)
+nifty50_stocks = ['CIPLA.NS', 'BHARTIARTL.NS', 'RELIANCE.NS', 'LTIM.NS', 'APOLLOHOSP.NS', 'TCS.NS', 'MARUTI.NS', 'WIPRO.NS', 'HEROMOTOCO.NS', 'ONGC.NS', 'BAJAJ-AUTO.NS', 'INDUSINDBK.NS', 'TATASTEEL.NS', 'ITC.NS', 'ADANIENT.NS', 'HDFCLIFE.NS', 'KOTAKBANK.NS', 'COALINDIA.NS', 'ULTRACEMCO.NS', 'TATACONSUM.NS', 'TITAN.NS', 'NESTLEIND.NS', 'BRITANNIA.NS', 'LT.NS', 'SHRIRAMFIN.NS', 'HINDALCO.NS', 'BAJAJFINSV.NS', 'NTPC.NS', 'BAJFINANCE.NS']
+
+# Step 3: Define the monitoring function
+def monitor_stocks():
+    while True:
+        for ticker in nifty50_stocks:
+            try:
+                # Fetch stock data
+                data = yf.download(ticker, period='5y', interval='1d')
+                
+                # Check if we have sufficient data
+                if len(data) < 30:
+                    print(f"Insufficient data for {ticker}. Skipping this check.")
+                    continue
+
+                # Calculate indicators using pandas_ta
+                data['RSI'] = ta.rsi(data['Close'], length=14)
+                macd = ta.macd(data['Close'], fast=12, slow=26, signal=9)
+                data['MACD'] = macd['MACD_12_26_9']
+                data['MACD_signal'] = macd['MACDs_12_26_9']
+                bbands = ta.bbands(data['Close'], length=20, std=2)
+                data['Upper_BB'] = bbands['BBU_20_2.0']
+                data['Lower_BB'] = bbands['BBL_20_2.0']
+
+                # Calculate average volume to detect a spike
+                avg_volume = data['Volume'].rolling(window=20).mean()
+                current_volume = data['Volume'].iloc[-1]
+
+                # Check if there's a spike in volume (e.g., current volume > 1.5 times the average volume)
+                if current_volume > 1.5 * avg_volume.iloc[-1]:
+                    # Retrieve the last values of RSI, MACD, and Bollinger Bands
+                    latest_rsi = data['RSI'].iloc[-1]
+                    latest_macd = data['MACD'].iloc[-1]
+                    latest_macd_signal = data['MACD_signal'].iloc[-1]
+                    latest_upper_bb = data['Upper_BB'].iloc[-1]
+                    latest_lower_bb = data['Lower_BB'].iloc[-1]
+                    latest_close = data['Close'].iloc[-1]
+
+                    # Compose the notification message
+                    message = (
+                        f"Spike in volume detected for {ticker}!\n"
+                        f"Current Volume: {current_volume}\n"
+                        f"Average Volume: {avg_volume.iloc[-1]:.2f}\n"
+                        f"RSI: {latest_rsi:.2f}\n"
+                        f"MACD: {latest_macd:.2f}\n"
+                        f"MACD Signal: {latest_macd_signal:.2f}\n"
+                        f"Price: {latest_close}\n"
+                        f"Bollinger Bands: [Upper: {latest_upper_bb:.2f}, Lower: {latest_lower_bb:.2f}]"
+                    )
+
+                    # Send the notification
+                    pb.push_note(f"Stock Alert for {ticker}", message)
+                    print(f"Notification sent for {ticker}")
+
+            except Exception as e:
+                print(f"Error processing {ticker}: {e}")
+        
+        # Sleep for a while before the next check (e.g., 5 minutes)
+        time.sleep(300)
+
+# Step 4: Run the monitoring function (you can stop this cell to stop monitoring)
+monitor_stocks()
