@@ -1,0 +1,478 @@
+# Nifty 50 Stock Price Prediction using LSTM
+
+# Import necessary libraries
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import yfinance as yf
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, LSTM, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+import seaborn as sns
+from datetime import datetime, timedelta
+import math
+
+# Set random seeds for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# Download Nifty 50 data (using ^NSEI ticker for Nifty 50)
+print("Downloading Nifty 50 data...")
+end_date = datetime.now().strftime('%Y-%m-%d')
+start_date = (datetime.now() - timedelta(days=5*365)).strftime('%Y-%m-%d')  # 5 years of data
+nifty_data = yf.download('^NSEI', start=start_date, end=end_date)
+
+# Display the first few rows of the data
+print("\nNifty 50 Data Preview:")
+print(nifty_data.head())
+
+# Check for missing values
+print("\nMissing values in the dataset:")
+print(nifty_data.isnull().sum())
+
+# Plot the historical Nifty 50 closing prices
+plt.figure(figsize=(14, 7))
+plt.title('Nifty 50 Historical Closing Prices')
+plt.xlabel('Date')
+plt.ylabel('Closing Price (₹)')
+plt.plot(nifty_data['Close'])
+plt.grid(True)
+plt.show()
+
+# Feature Engineering - Calculate technical indicators
+# 1. Moving Averages
+nifty_data['MA_5'] = nifty_data['Close'].rolling(window=5).mean()
+nifty_data['MA_20'] = nifty_data['Close'].rolling(window=20).mean()
+nifty_data['MA_50'] = nifty_data['Close'].rolling(window=50).mean()
+
+# 2. RSI (Relative Strength Index) - with error handling
+delta = nifty_data['Close'].diff()
+gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+# Handle division by zero
+loss = loss.replace(0, np.nan)  # Replace zeros with NaN to avoid division by zero
+rs = gain / loss
+rs = rs.fillna(0)  # Replace NaN with 0 (this means no losses in the period)
+nifty_data['RSI'] = 100 - (100 / (1 + rs))
+nifty_data['RSI'] = nifty_data['RSI'].fillna(100)  # If no losses, RSI = 100
+
+# 3. MACD (Moving Average Convergence Divergence)
+exp1 = nifty_data['Close'].ewm(span=12, adjust=False).mean()
+exp2 = nifty_data['Close'].ewm(span=26, adjust=False).mean()
+nifty_data['MACD'] = exp1 - exp2
+nifty_data['Signal_Line'] = nifty_data['MACD'].ewm(span=9, adjust=False).mean()
+nifty_data['MACD_Histogram'] = nifty_data['MACD'] - nifty_data['Signal_Line']
+
+# 4. Bollinger Bands
+nifty_data['20_Day_STD'] = nifty_data['Close'].rolling(window=20).std()
+nifty_data['Upper_Band'] = nifty_data['MA_20'] + (nifty_data['20_Day_STD'] * 2)
+nifty_data['Lower_Band'] = nifty_data['MA_20'] - (nifty_data['20_Day_STD'] * 2)
+
+# 5. Volume Features
+nifty_data['Volume_Change'] = nifty_data['Volume'].pct_change()
+nifty_data['Volume_MA_5'] = nifty_data['Volume'].rolling(window=5).mean()
+
+# 6. Price Momentum Features
+nifty_data['Price_Change'] = nifty_data['Close'].pct_change()
+nifty_data['Price_Change_5'] = nifty_data['Close'].pct_change(periods=5)
+nifty_data['Price_Change_10'] = nifty_data['Close'].pct_change(periods=10)
+
+# Replace infinite values with NaN and then fill NaN values
+nifty_data = nifty_data.replace([np.inf, -np.inf], np.nan)
+
+# Fill NaN values with appropriate methods
+# For technical indicators, forward fill is often appropriate
+nifty_data = nifty_data.fillna(method='ffill')
+# Any remaining NaNs at the beginning can be filled with zeros or means
+nifty_data = nifty_data.fillna(0)
+
+# Verify no more infinite values
+assert not np.any(np.isinf(nifty_data.values))
+
+# Plot technical indicators
+plt.figure(figsize=(14, 18))
+
+# Price and Moving Averages
+plt.subplot(4, 1, 1)
+plt.title('Nifty 50 Close Price and Moving Averages')
+plt.plot(nifty_data['Close'], label='Close Price', alpha=0.6)
+plt.plot(nifty_data['MA_5'], label='5-day MA', alpha=0.7)
+plt.plot(nifty_data['MA_20'], label='20-day MA', alpha=0.7)
+plt.plot(nifty_data['MA_50'], label='50-day MA', alpha=0.7)
+plt.legend()
+plt.grid(True)
+
+# RSI
+plt.subplot(4, 1, 2)
+plt.title('Relative Strength Index (RSI)')
+plt.plot(nifty_data['RSI'], color='purple')
+plt.axhline(y=70, color='r', linestyle='-', alpha=0.3)
+plt.axhline(y=30, color='g', linestyle='-', alpha=0.3)
+plt.grid(True)
+
+# MACD
+plt.subplot(4, 1, 3)
+plt.title('MACD')
+plt.plot(nifty_data['MACD'], label='MACD', color='blue')
+plt.plot(nifty_data['Signal_Line'], label='Signal Line', color='red')
+plt.bar(nifty_data.index, nifty_data['MACD_Histogram'], color='green', alpha=0.5)
+plt.legend()
+plt.grid(True)
+
+# Bollinger Bands
+plt.subplot(4, 1, 4)
+plt.title('Bollinger Bands')
+plt.plot(nifty_data['Close'], label='Close Price', alpha=0.6)
+plt.plot(nifty_data['Upper_Band'], label='Upper Band', color='green')
+plt.plot(nifty_data['MA_20'], label='20-day MA', color='orange')
+plt.plot(nifty_data['Lower_Band'], label='Lower Band', color='red')
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Check correlation between features
+correlation_matrix = nifty_data[['Close', 'Volume', 'MA_5', 'MA_20', 'RSI', 'MACD', 'Upper_Band', 'Lower_Band', 'Volume_Change', 'Price_Change']].corr()
+
+plt.figure(figsize=(12, 10))
+sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt='.2f', linewidths=0.5)
+plt.title('Feature Correlation Matrix')
+plt.tight_layout()
+plt.show()
+
+# Data Preparation for LSTM
+# Select features for the model
+features = ['Close', 'Volume', 'MA_5', 'MA_20', 'RSI', 'MACD', 'Upper_Band', 'Lower_Band', 'Volume_Change', 'Price_Change']
+data = nifty_data[features].values
+
+# Verify no infinite values in the data
+assert not np.any(np.isinf(data))
+
+# Create a scaler and apply it to the features
+scaler = MinMaxScaler(feature_range=(0, 1))
+scaled_data = scaler.fit_transform(data)
+
+# Create sequences for LSTM input
+def create_sequences(data, seq_length):
+    X, y = [], []
+    for i in range(len(data) - seq_length):
+        X.append(data[i:i + seq_length])
+        # We only want to predict the Close price (first feature)
+        y.append(data[i + seq_length, 0])  
+    return np.array(X), np.array(y)
+
+# Parameters
+sequence_length = 60  # Number of time steps to look back
+split_ratio = 0.8  # 80% training, 20% testing
+
+# Create sequences
+X, y = create_sequences(scaled_data, sequence_length)
+
+# Split the data into training and testing sets
+train_size = int(len(X) * split_ratio)
+X_train, X_test = X[:train_size], X[train_size:]
+y_train, y_test = y[:train_size], y[train_size:]
+
+print(f"\nTraining data shape: {X_train.shape}, {y_train.shape}")
+print(f"Testing data shape: {X_test.shape}, {y_test.shape}")
+
+# Build the LSTM model
+model = Sequential()
+model.add(LSTM(units=50, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])))
+model.add(Dropout(0.2))
+model.add(LSTM(units=50, return_sequences=False))
+model.add(Dropout(0.2))
+model.add(Dense(units=25))
+model.add(Dense(units=1))
+
+# Compile the model
+model.compile(optimizer='adam', loss='mean_squared_error')
+
+# Define early stopping
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+
+# Train the model
+print("\nTraining the LSTM model...")
+history = model.fit(
+    X_train, y_train,
+    epochs=50,
+    batch_size=32,
+    validation_split=0.2,
+    callbacks=[early_stopping],
+    verbose=1
+)
+
+# Plot training history
+plt.figure(figsize=(12, 6))
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.title('LSTM Model Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Make predictions
+train_predictions = model.predict(X_train)
+test_predictions = model.predict(X_test)
+
+# Prepare data for inverse transformation (to get back to original scale)
+# We need to add placeholder values for the other features
+train_pred_placeholder = np.zeros((len(train_predictions), data.shape[1]))
+train_pred_placeholder[:, 0] = train_predictions.flatten()
+test_pred_placeholder = np.zeros((len(test_predictions), data.shape[1]))
+test_pred_placeholder[:, 0] = test_predictions.flatten()
+
+# Inverse transform
+train_predictions = scaler.inverse_transform(train_pred_placeholder)[:, 0]
+test_predictions = scaler.inverse_transform(test_pred_placeholder)[:, 0]
+
+# Get actual values
+y_train_actual = np.zeros((len(y_train), data.shape[1]))
+y_train_actual[:, 0] = y_train
+y_test_actual = np.zeros((len(y_test), data.shape[1]))
+y_test_actual[:, 0] = y_test
+
+y_train_actual = scaler.inverse_transform(y_train_actual)[:, 0]
+y_test_actual = scaler.inverse_transform(y_test_actual)[:, 0]
+
+# Calculate performance metrics
+train_rmse = math.sqrt(mean_squared_error(y_train_actual, train_predictions))
+test_rmse = math.sqrt(mean_squared_error(y_test_actual, test_predictions))
+train_mae = mean_absolute_error(y_train_actual, train_predictions)
+test_mae = mean_absolute_error(y_test_actual, test_predictions)
+train_r2 = r2_score(y_train_actual, train_predictions)
+test_r2 = r2_score(y_test_actual, test_predictions)
+
+print("\nModel Performance Metrics:")
+print(f"Training RMSE: {train_rmse:.2f}")
+print(f"Testing RMSE: {test_rmse:.2f}")
+print(f"Training MAE: {train_mae:.2f}")
+print(f"Testing MAE: {test_mae:.2f}")
+print(f"Training R²: {train_r2:.4f}")
+print(f"Testing R²: {test_r2:.4f}")
+
+# Calculate MAPE (Mean Absolute Percentage Error) with error handling for zeros
+def safe_mape(y_true, y_pred):
+    # Avoid division by zero
+    mask = y_true != 0
+    return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
+
+train_mape = safe_mape(y_train_actual, train_predictions)
+test_mape = safe_mape(y_test_actual, test_predictions)
+print(f"Training MAPE: {train_mape:.2f}%")
+print(f"Testing MAPE: {test_mape:.2f}%")
+
+# Plot the predictions against actual values
+plt.figure(figsize=(16, 8))
+
+# Create dates for x-axis
+train_dates = nifty_data.index[sequence_length:train_size+sequence_length]
+test_dates = nifty_data.index[train_size+sequence_length:]
+
+# Plot training predictions
+plt.subplot(2, 1, 1)
+plt.plot(train_dates, y_train_actual, label='Actual Price', color='blue')
+plt.plot(train_dates, train_predictions, label='Predicted Price', color='red')
+plt.title('Nifty 50 Price Prediction - Training Data')
+plt.xlabel('Date')
+plt.ylabel('Price (₹)')
+plt.legend()
+plt.grid(True)
+
+# Plot testing predictions
+plt.subplot(2, 1, 2)
+plt.plot(test_dates, y_test_actual, label='Actual Price', color='blue')
+plt.plot(test_dates, test_predictions, label='Predicted Price', color='red')
+plt.title('Nifty 50 Price Prediction - Testing Data')
+plt.xlabel('Date')
+plt.ylabel('Price (₹)')
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Create a scatter plot of predicted vs actual values
+plt.figure(figsize=(12, 6))
+plt.subplot(1, 2, 1)
+plt.scatter(y_train_actual, train_predictions, alpha=0.5)
+plt.plot([y_train_actual.min(), y_train_actual.max()], [y_train_actual.min(), y_train_actual.max()], 'k--', alpha=0.5)
+plt.title('Training: Actual vs Predicted')
+plt.xlabel('Actual Price')
+plt.ylabel('Predicted Price')
+plt.grid(True)
+
+plt.subplot(1, 2, 2)
+plt.scatter(y_test_actual, test_predictions, alpha=0.5)
+plt.plot([y_test_actual.min(), y_test_actual.max()], [y_test_actual.min(), y_test_actual.max()], 'k--', alpha=0.5)
+plt.title('Testing: Actual vs Predicted')
+plt.xlabel('Actual Price')
+plt.ylabel('Predicted Price')
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Create a residual plot
+plt.figure(figsize=(12, 6))
+plt.subplot(1, 2, 1)
+train_residuals = y_train_actual - train_predictions
+plt.scatter(train_predictions, train_residuals, alpha=0.5)
+plt.axhline(y=0, color='r', linestyle='-')
+plt.title('Training Residuals')
+plt.xlabel('Predicted Price')
+plt.ylabel('Residual')
+plt.grid(True)
+
+plt.subplot(1, 2, 2)
+test_residuals = y_test_actual - test_predictions
+plt.scatter(test_predictions, test_residuals, alpha=0.5)
+plt.axhline(y=0, color='r', linestyle='-')
+plt.title('Testing Residuals')
+plt.xlabel('Predicted Price')
+plt.ylabel('Residual')
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Plot residual distribution
+plt.figure(figsize=(12, 6))
+plt.subplot(1, 2, 1)
+sns.histplot(train_residuals, kde=True)
+plt.title('Training Residuals Distribution')
+plt.grid(True)
+
+plt.subplot(1, 2, 2)
+sns.histplot(test_residuals, kde=True)
+plt.title('Testing Residuals Distribution')
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# Plot prediction error over time
+plt.figure(figsize=(16, 6))
+plt.plot(test_dates, y_test_actual, label='Actual Price', color='blue', alpha=0.6)
+plt.plot(test_dates, test_predictions, label='Predicted Price', color='red', alpha=0.6)
+plt.fill_between(test_dates, y_test_actual, test_predictions, color='gray', alpha=0.3, label='Error')
+plt.title('Prediction Error Over Time')
+plt.xlabel('Date')
+plt.ylabel('Price (₹)')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Calculate feature importance by disrupting each feature
+feature_importance = {}
+
+for i, feature_name in enumerate(features):
+    X_test_copy = X_test.copy()
+    # Shuffle the values of this feature across all sequences
+    X_test_copy[:, :, i] = np.random.permutation(X_test_copy[:, :, i])
+    
+    # Predict with the shuffled feature
+    disrupted_predictions = model.predict(X_test_copy)
+    
+    # Convert predictions back to original scale
+    disrupted_pred_placeholder = np.zeros((len(disrupted_predictions), data.shape[1]))
+    disrupted_pred_placeholder[:, 0] = disrupted_predictions.flatten()
+    disrupted_predictions = scaler.inverse_transform(disrupted_pred_placeholder)[:, 0]
+    
+    # Calculate how much worse the predictions got
+    disruption_rmse = math.sqrt(mean_squared_error(y_test_actual, disrupted_predictions))
+    feature_importance[feature_name] = disruption_rmse - test_rmse
+
+# Normalize feature importance
+total_importance = sum([max(0, v) for v in feature_importance.values()])  # Ensure we don't have negative values
+if total_importance > 0:  # Avoid division by zero
+    normalized_importance = {k: max(0, v) / total_importance for k, v in feature_importance.items()}
+else:
+    normalized_importance = {k: 0 for k in feature_importance}
+
+# Plot feature importance
+plt.figure(figsize=(12, 6))
+plt.bar(normalized_importance.keys(), normalized_importance.values())
+plt.title('Feature Importance')
+plt.xlabel('Feature')
+plt.ylabel('Normalized Importance')
+plt.xticks(rotation=45)
+plt.grid(True, axis='y')
+plt.tight_layout()
+plt.show()
+
+# Forecast the next 30 days
+def forecast_future(model, last_sequence, scaler, data_shape, steps=30):
+    future_predictions = []
+    current_sequence = last_sequence.copy()
+    
+    for _ in range(steps):
+        # Predict next value
+        current_batch = np.reshape(current_sequence, (1, current_sequence.shape[0], current_sequence.shape[1]))
+        next_pred = model.predict(current_batch)[0]
+        
+        # Create a placeholder for inverse transform
+        pred_placeholder = np.zeros((1, data_shape[1]))
+        pred_placeholder[0, 0] = next_pred
+        
+        # Get the predicted close price in original scale
+        pred_original = scaler.inverse_transform(pred_placeholder)[0, 0]
+        future_predictions.append(pred_original)
+        
+        # Update features for next prediction
+        # This is simplified and assumes we can generate the next technical indicators
+        # In reality, you would need to update all features based on the new prediction
+        new_row = current_sequence[-1].copy()
+        new_row[0] = next_pred  # Update close price
+        
+        # Remove first row and add the new prediction to sequence
+        current_sequence = np.vstack([current_sequence[1:], new_row])
+    
+    return future_predictions
+
+# Get the last known sequence
+last_sequence = X_test[-1]
+
+# Forecast next 30 days
+future_preds = forecast_future(model, last_sequence, scaler, data.shape, steps=30)
+
+# Create future dates
+last_date = nifty_data.index[-1]
+future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=30, freq='B')  # Business days
+
+# Plot the forecast
+plt.figure(figsize=(16, 8))
+plt.plot(nifty_data.index[-100:], nifty_data['Close'].values[-100:], label='Historical Close Price')
+plt.plot(future_dates, future_preds, label='30-Day Forecast', color='red')
+plt.title('Nifty 50 30-Day Price Forecast')
+plt.xlabel('Date')
+plt.ylabel('Price (₹)')
+plt.axvline(x=last_date, color='gray', linestyle='--', alpha=0.5)
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Create a dataframe with the forecasted values
+forecast_df = pd.DataFrame({
+    'Date': future_dates,
+    'Forecasted_Close': future_preds
+})
+
+print("\n30-Day Nifty 50 Forecast:")
+print(forecast_df)
+
+# Summary and conclusion
+print("\nSummary of LSTM Model for Nifty 50 Prediction:")
+print(f"1. Test RMSE: {test_rmse:.2f}")
+print(f"2. Test MAPE: {test_mape:.2f}%")
+print(f"3. Test R²: {test_r2:.4f}")
+print("\nConclusion:")
+print("The LSTM model has been trained on Nifty 50 historical data with multiple technical indicators.")
+print("While the model shows promising results, stock market prediction is inherently difficult and subject to many external factors.")
+print("This model should be used as one of several tools for investment decision-making, not as the sole basis for trading decisions.")
